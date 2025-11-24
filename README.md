@@ -242,3 +242,32 @@ Once the deployment is complete, you can access the application and services via
 * Login Failed / Invalid: Caused by empty database tables. Solved by injecting db_backup.sql from the source code into MariaDB.
 
 * Browser Privacy Warning: Caused by the self-signed SSL certificate. It is safe to click "Advanced -> Proceed" for this local lab.
+
+---
+
+## Project Screenshots
+
+Here is the visual validation of the deployment, confirming that all tiers are interconnected and functioning correctly.
+
+### 1. Full Stack Verification (Application Dashboard)
+Successful login to the application dashboard using credentials stored in the MariaDB database. This confirms the **Nginx -> Tomcat -> Database** connectivity.
+<img width="1891" height="859" alt="image" src="https://github.com/user-attachments/assets/8474873f-68e7-49a4-bf9d-5486ca1f845f" />
+--
+<img width="1902" height="882" alt="image" src="https://github.com/user-attachments/assets/53a07c56-cebc-4e4b-a627-895e0c7170cb" />
+
+### 2. Database Connectivity Check (Terminal)
+Direct verification from the App Tier (`app01`) to the DB Tier (`db01`) using MySQL client, listing the created tables. This proves the **JDBC Connection** and **Firewall Rules** are correct.
+<img width="257" height="300" alt="image" src="https://github.com/user-attachments/assets/f095d157-e526-4ecf-b21e-23267c2ee864" />
+
+### 3. Message Broker Console (RabbitMQ)
+Accessing the RabbitMQ Management Interface via port `15672`, showing the running node and queue status.
+<img width="1878" height="1035" alt="image" src="https://github.com/user-attachments/assets/e4989fc1-31dc-432b-8908-3f79932a938c" />
+
+
+### 4. Tomcat Default Page (Initial Setup)
+Verification that the Apache Tomcat server was successfully installed and running on port `8080` before deploying the application artifact.
+<img width="920" height="918" alt="image" src="https://github.com/user-attachments/assets/834fa071-7ee3-4cbe-87aa-66e52f841ad9" />
+
+---------------------------
+
+
