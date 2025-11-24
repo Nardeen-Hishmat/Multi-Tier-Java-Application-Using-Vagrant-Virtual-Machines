@@ -1,0 +1,241 @@
+Vagrant.configure("2") do |config|
+  
+  # ===========================
+  # 1. Database Tier (db01)
+  # ===========================
+  config.vm.define "db01" do |db01|
+    db01.vm.box = "eurolinux-vagrant/centos-stream-9"
+    db01.vm.hostname = "db01"
+    db01.vm.network "private_network", ip: "192.168.56.15"
+    db01.vm.provider "virtualbox" do |vb|
+      vb.memory = "1024"
+      vb.name = "db01_mariadb"
+    end
+    
+    db01.vm.provision "shell", inline: <<-SHELL
+      echo "Provisioning Database..."
+      dnf install mariadb-server -y
+      systemctl start mariadb
+      systemctl enable mariadb
+      
+      # --- FIX: Create 'accounts' DB to match Java Code ---
+      mysql -u root <<-EOF
+CREATE DATABASE IF NOT EXISTS accounts;
+CREATE USER IF NOT EXISTS 'appuser'@'%' IDENTIFIED BY 'app123';
+GRANT ALL PRIVILEGES ON accounts.* TO 'appuser'@'%';
+FLUSH PRIVILEGES;
+EOF
+      # ----------------------------------------------------
+      
+      dnf install firewalld -y
+      systemctl start firewalld
+      firewall-cmd --add-port=3306/tcp --permanent
+      firewall-cmd --reload
+    SHELL
+  end
+
+  # ===========================
+  # 2. Cache Tier (mc01)
+  # ===========================
+  config.vm.define "mc01" do |mc01|
+    mc01.vm.box = "eurolinux-vagrant/centos-stream-9"
+    mc01.vm.hostname = "mc01"
+    mc01.vm.network "private_network", ip: "192.168.56.14"
+    mc01.vm.provider "virtualbox" do |vb|
+      vb.memory = "600"
+      vb.name = "mc01_memcached"
+    end
+
+    mc01.vm.provision "shell", inline: <<-SHELL
+      echo "Provisioning Memcached..."
+      dnf install memcached -y
+      sed -i 's/127.0.0.1/0.0.0.0/g' /etc/sysconfig/memcached
+      systemctl start memcached
+      systemctl enable memcached
+      
+      dnf install firewalld -y
+      systemctl start firewalld
+      firewall-cmd --add-port=11211/tcp --permanent
+      firewall-cmd --reload
+    SHELL
+  end
+
+  # ===========================
+  # 3. RabbitMQ Tier (rmq01)
+  # ===========================
+  config.vm.define "rmq01" do |rmq01|
+    rmq01.vm.box = "eurolinux-vagrant/centos-stream-9"
+    rmq01.vm.hostname = "rmq01"
+    rmq01.vm.network "private_network", ip: "192.168.56.13"
+    rmq01.vm.provider "virtualbox" do |vb|
+      vb.memory = "600"
+      vb.name = "rmq01_rabbitmq"
+    end
+
+    rmq01.vm.provision "shell", inline: <<-SHELL
+      echo "Provisioning RabbitMQ..."
+      curl -s https://packagecloud.io/install/repositories/rabbitmq/erlang/script.rpm.sh | bash
+      curl -s https://packagecloud.io/install/repositories/rabbitmq/rabbitmq-server/script.rpm.sh | bash
+      dnf install rabbitmq-server -y
+      systemctl start rabbitmq-server
+      systemctl enable rabbitmq-server
+      
+      rabbitmq-plugins enable rabbitmq_management
+      echo '[{rabbit, [{loopback_users, []}]}].' > /etc/rabbitmq/rabbitmq.config
+      systemctl restart rabbitmq-server
+      
+      dnf install firewalld -y
+      systemctl start firewalld
+      firewall-cmd --add-port=5672/tcp --permanent
+      firewall-cmd --add-port=15672/tcp --permanent
+      firewall-cmd --reload
+    SHELL
+  end
+
+  # ===========================
+  # 4. App Tier (app01)
+  # ===========================
+  config.vm.define "app01" do |app01|
+    app01.vm.box = "eurolinux-vagrant/centos-stream-9"
+    app01.vm.hostname = "app01"
+    app01.vm.network "private_network", ip: "192.168.56.12"
+    app01.vm.provider "virtualbox" do |vb|
+      vb.memory = "2048"
+      vb.cpus = 2
+      vb.name = "app01_tomcat"
+    end
+
+    app01.vm.provision "shell", inline: <<-SHELL
+      echo "Provisioning Tomcat Application..."
+      
+      # Hosts entries (To resolve db01, mc01...)
+      echo "192.168.56.15 db01" >> /etc/hosts
+      echo "192.168.56.14 mc01" >> /etc/hosts
+      echo "192.168.56.13 rmq01" >> /etc/hosts
+
+      # Install Dependencies
+      dnf install java-11-openjdk-devel git maven mysql -y
+      
+      # Install Tomcat
+      cd /tmp
+      wget https://archive.apache.org/dist/tomcat/tomcat-9/v9.0.75/bin/apache-tomcat-9.0.75.tar.gz
+      tar -xzvf apache-tomcat-9.0.75.tar.gz
+      rm -rf /usr/local/tomcat
+      mv apache-tomcat-9.0.75 /usr/local/tomcat
+      
+      # User & Permissions
+      useradd --home-dir /usr/local/tomcat --shell /sbin/nologin tomcat
+      chown -R tomcat:tomcat /usr/local/tomcat
+      chmod +x /usr/local/tomcat/bin/*.sh
+      
+      # Systemd Service (Fixed JAVA_HOME path)
+      cat <<EOT > /etc/systemd/system/tomcat.service
+[Unit]
+Description=Tomcat
+After=network.target
+[Service]
+User=tomcat
+Group=tomcat
+WorkingDirectory=/usr/local/tomcat
+Environment=JAVA_HOME=/usr/lib/jvm/java-11-openjdk
+Environment=CATALINA_PID=/usr/local/tomcat/temp/tomcat.pid
+Environment=CATALINA_HOME=/usr/local/tomcat
+Environment=CATALINA_BASE=/usr/local/tomcat
+ExecStart=/usr/local/tomcat/bin/catalina.sh run
+ExecStop=/usr/local/tomcat/bin/shutdown.sh
+RestartSec=10
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOT
+      
+      systemctl daemon-reload
+      systemctl start tomcat
+      systemctl enable tomcat
+      
+      # Build & Deploy Application
+      cd /home/vagrant
+      rm -rf sourcecodeseniorwr
+      git clone https://github.com/abdelrahmanonline4/sourcecodeseniorwr.git
+      cd sourcecodeseniorwr
+      
+      # --- FIX: Update Configs (Use 'accounts' DB name) ---
+      sed -i 's/jdbc.url=.*/jdbc.url=jdbc:mysql:\/\/192.168.56.15:3306\/accounts?useUnicode=true\&characterEncoding=utf8\&useSSL=false/' src/main/resources/application.properties
+      sed -i 's/jdbc.username=.*/jdbc.username=appuser/' src/main/resources/application.properties
+      sed -i 's/jdbc.password=.*/jdbc.password=app123/' src/main/resources/application.properties
+      sed -i 's/memcached.active.host=.*/memcached.active.host=192.168.56.14/' src/main/resources/application.properties
+      sed -i 's/rabbitmq.address=.*/rabbitmq.address=192.168.56.13/' src/main/resources/application.properties
+      # ----------------------------------------------------
+      
+      # Build
+      mvn install
+      
+      # Deploy
+      systemctl stop tomcat
+      rm -rf /usr/local/tomcat/webapps/ROOT*
+      cp target/*.war /usr/local/tomcat/webapps/ROOT.war
+      systemctl start tomcat
+      
+      # --- FIX: Seed Database (Inject into 'accounts') ---
+      sleep 20
+      mysql -u appuser -papp123 -h 192.168.56.15 accounts < src/main/resources/db_backup.sql
+      # ---------------------------------------------------
+      
+      # Firewall
+      dnf install firewalld -y
+      systemctl start firewalld
+      firewall-cmd --add-port=8080/tcp --permanent
+      firewall-cmd --reload
+    SHELL
+  end
+
+  # ===========================
+  # 5. Web Tier (web01)
+  # ===========================
+  config.vm.define "web01" do |web01|
+    web01.vm.box = "hashicorp/bionic64"
+    web01.vm.hostname = "web01"
+    web01.vm.network "private_network", ip: "192.168.56.11"
+    web01.vm.provider "virtualbox" do |vb|
+      vb.memory = "800"
+      vb.name = "web01_nginx"
+    end
+
+    web01.vm.provision "shell", inline: <<-SHELL
+      echo "Provisioning Nginx..."
+      apt-get update
+      apt-get install nginx -y
+      
+      # SSL Certs
+      mkdir -p /etc/nginx/ssl
+      openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout /etc/nginx/ssl/nginx.key \
+        -out /etc/nginx/ssl/nginx.crt \
+        -subj "/C=EG/ST=Cairo/L=Cairo/O=DevOps/OU=IT/CN=192.168.56.11"
+      
+      # Nginx Config
+      cat <<EOT > /etc/nginx/sites-available/default
+server {
+    listen 80;
+    server_name _;
+    return 301 https://\\$host\\$request_uri;
+}
+server {
+    listen 443 ssl;
+    server_name _;
+    ssl_certificate /etc/nginx/ssl/nginx.crt;
+    ssl_certificate_key /etc/nginx/ssl/nginx.key;
+    location / {
+        proxy_pass http://192.168.56.12:8080;
+        proxy_set_header Host \\$host;
+        proxy_set_header X-Real-IP \\$remote_addr;
+        proxy_set_header X-Forwarded-For \\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}
+EOT
+      
+      systemctl restart nginx
+    SHELL
+  end
+end
